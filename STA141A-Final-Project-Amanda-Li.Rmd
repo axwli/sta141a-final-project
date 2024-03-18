@@ -1,0 +1,664 @@
+---
+title: "STA141A Final Project: Predicting Mice Success from Neural Activities"
+author: "Amanda Li"
+date: "2024-03-18"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: default
+---
+
+```{r echo=FALSE, eval=TRUE, message=FALSE, results='hide',message=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+```{r echo=FALSE, eval=TRUE, message=FALSE}
+suppressWarnings(library(tidyverse))
+suppressWarnings(library(ggplot2))
+suppressWarnings(library(dplyr))
+suppressWarnings(library(caret))
+suppressWarnings(library(ROCR))
+suppressWarnings(library(knitr))
+suppressWarnings(library(caTools))
+suppressWarnings(library(rpart))
+```
+
+```{r}
+session = list()
+for(i in 1:18){
+  session[[i]] <- readRDS(paste('/Users/AmandaLi/Desktop/Courses/STA141A/Final-Project/sessions/session',i,'.rds',sep=''))
+  #print(session[[i]]$mouse_name)
+  #print(session[[i]]$date_exp)
+}
+```
+
+## **Abstract**
+Understanding the neural mechanisms underlying decision-making, action execution, and engagement with our environment is a fundamental pursuit in neuroscience. The interplay of neural circuits across various brain regions facilitates these cognitive processes, yet the specific principles that manage these complex behaviors remain cloudy. The study of animal models, particularly mice, has emerged as a powerful tool for probing the neural activity of behavior. In this project, I used data collected from Steinmetz et al. (2019) to predict the feedback type, or success of mice following trials of stimuli. Each mouse in the study was presented with visual stimuli and tasked with making directional decisions, prompting them to move the wheel in a specific direction corresponding to the visual cues. A reward and penalty system was implemented, contingent upon the accuracy of the mouse's response to the visual stimuli. Rewards were given for correct movements and penalties were given for incorrect ones. The primary objective of this project is to develop a predictive model capable of predicting the outcomes of future sessions based on the data collected from observations involving these four mice. I first do this by performing Exploratory Data Analysis (EDA) to observe dynamics between the trials among each session. Next, I perform data integration to form a comprehensive dataset. My findings show that both logistic regression and decision trees yield similar results, with an accuracy hovering above 70%. However, when predicting unseen data, the logistic regression model performed 10% better than the decision tree. Thus, in the scope of my project, a logistic regression model is the most appropriate for this mice data.
+
+## **1. Introduction**
+The data source is derived from the paper "Distributed coding of choice, action, and engagement across the mouse brain" by Steinmetz et al. (2019). The target sample encompasses the 10 mice analyzed by Steinmetz, with a focus on 4 mice across 18 sessions, randomly sampled to reduce bias. The `feedback_type` variable assigns positive or negative scores based on mice's wheel-turning responses to stimuli. `Left_contrast` and `right_contrast` denote the visual stimuli's intensity, influencing wheel-turning direction. Time records neural activity spikes timing, while `spks` indicates brain activity intensity during the activity. `Brain_area` signifies the brain region involved, `mouse_name` specifies mouse identities, and `date_exp` records trial dates. Within this dataset, neural activity refers to patterns of electrical and biochemical occurrences within neurons, each linked to various facets of continuous decision-making, action selection, and task engagement. Moreover, the original experiment shows that the observation of neural activity is not confined to isolated regions of the brain but often involves stimulation across multiple brain areas.
+
+The `feedback_type` variable reflects the outcome of the experiment, determining a positive or negative score based on whether the mice successfully turn the wheel in the correct direction in response to the stimuli presented. Meanwhile, the `left_contrast` variable denotes the intensity of the visual stimuli, taking values from the set {0, 0.25, 0.5, 1}, where 0 signifies the absence of stimuli and 1 represents a strong presence. Correspondingly, `right_contrast` mirrors `left_contrast`, encompassing the same range of values. If the `left_contrast` exceeds the `right_contrast`, the feedback_type is assigned a value of 1, indicating successful wheel turning to the right, while any other response results in a -1. Conversely, if the `right_contrast` surpasses the `left_contrast`, a feedback_type of 1 signifies successful wheel turning to the left, with -1 assigned for alternative responses. In cases where the contrasts are identical, one contrast is designated as correct. Furthermore, when both `left_contrast` and `right_contrast` are 0, successful completion of the task entails the mice holding the wheel still.
+
+Several questions drive the analysis, including the difference in activated neurons between correct and incorrect responses to visual stimuli, common patterns across sessions, potential differences in neural activity between mice, and the effectiveness of the predictive model across various session data, along with the corresponding misclassification rate. Addressing these questions aims to provide meaningful insights into the dataset. A similar study conducted by Dr. Charles Findling (2023) on brain-wide representations of prior information in mouse decision-making provides recent and valuable insights for this analysis. His research, which utilized brain-wide neuropixels recordings and widefield calcium imaging performed by the International Brain Laboratory, focused on mice trained to detect the location of visual stimuli. These stimuli appeared either on the left or right, with prior probabilities alternating between 0.2 and 0.8 in variable-length blocks. Findling's findings offer supplementary insights into mouse neural pathways, aligning well with the objectives of our predictive modeling efforts. By integrating these research findings with our analysis, we can further our understanding of mouse behavior and neural dynamics, ultimately enhancing the predictive modeling process.
+
+
+```{r}
+n.session = length(session) 
+# column names
+meta <- tibble(
+  mouse_name = rep('name',n.session),
+  date_exp =rep('dt',n.session),
+  brain_area = rep(0,n.session),
+  neurons = rep(0,n.session),
+  trials = rep(0,n.session),
+  success_rate = rep(0,n.session)
+)
+
+# table representing each session as an observation
+for(i in 1:n.session){ 
+  temp = session[[i]];
+  meta[i,1]=temp$mouse_name;
+  meta[i,2]=temp$date_exp;
+  meta[i,3]=length(unique(temp$brain_area));
+  meta[i,4]=dim(temp$spks[[1]])[1];
+  meta[i,5]=length(temp$feedback_type);
+  meta[i,6]=mean(temp$feedback_type+1)/2;
+}
+# print table for report
+kable(meta, format = "html", table.attr = "class='table table-striped'",digits=2, caption = "All 18 Sessions")
+```
+<center>
+**Figure 1**: Table representing all 18 mice sessions. 
+
+This table contains six variables, from left to right: the name of the mouse observed, the date of the session, the number of brain areas, neural spikes from each trial in the session, the number of trials in the session, and the average success rate (feedback) for the session.
+</center>
+
+## **2. Exploratory Data Analysis**
+
+### 2.1 Descriptive Elements
+71% of all trials are successful among all sessions. There are 62 distinct levels in the brain area.
+```{r, results='hide'}
+# feedback type
+n.session=length(session)
+n_success = 0
+n_trial = 0
+
+for(i in 1:n.session){
+    temp = session[[i]];
+    n_trial = n_trial + length(temp$feedback_type);
+    n_success = n_success + sum(temp$feedback_type == 1);
+}
+n_success/n_trial
+
+# brain area
+area = c()
+for(i in 1:n.session){
+    temp = session[[i]];
+    area = c(area, unique(temp$brain_area))
+}
+
+length(unique(area))
+```
+
+### 2.2 EDA Figures
+
+```{r, fig.align='center'}
+plot.df <- meta %>% 
+  group_by(mouse_name) %>%
+  summarize(avg_success = mean(success_rate))
+
+ggplot(plot.df, aes(x = mouse_name, y = avg_success)) +
+  geom_bar(stat="identity", fill = "pink") +
+  labs(x = "Mouse Name",
+       y = "Average Success Rate") +
+  ggtitle("Average Success Per Mouse") +
+  theme_minimal()
+  
+```
+
+<center>
+**Figure 2.2.1**: Average success rates across all four mice.
+</center>
+
+```{r, fig.align='center'}
+# boxplot: number of sessions vs success_rate
+ggplot(data = meta, aes(x = c(1:18), y = success_rate, fill = mouse_name)) +
+  geom_boxplot() +
+  labs(x = "Number of Sessions", y = "Success Rate") +
+  scale_fill_discrete(name = "Mouse Name") +
+  ggtitle("Number of Sessions vs. Success by Mouse") +
+  theme_minimal()
+```
+<center>
+**Figure 2.2.2**: Number of sessions vs. success, by mouse.
+</center>
+
+The graph shows variations in the average feedback success across all trials for each mouse. Notably, Lederberg has the highest feedback success rate despite exhibiting the lowest number of neuron spikes. On the other hand, Forssmann, a mouse with many neuron spikes, ranks second in terms of feedback success. This alignment shows the recurring similarities observed in the feedback success rates among the mice across all sessions, shedding light on significant trends. Notably, there seems to be an outlier present with Forssmann's session 6, but that data is negligible as the remaining quartile range is consistent. We can infer that the feedback success rate remains relatively consistent across all mice.
+
+```{r}
+# observing session 2
+i.s=2 # indicator for this session
+i.t=1 # indicator for this trial 
+
+spk.trial = session[[i.s]]$spks[[i.t]]
+area=session[[i.s]]$brain_area
+
+# We need to first calculate the number of spikes for each neuron during this trial 
+spk.count=apply(spk.trial,1,sum)
+spk.average.tapply=tapply(spk.count, area, mean)
+
+# df
+tmp <- data.frame(
+  area = area,
+  spikes = spk.count
+)
+# Calculate the average by group using dplyr
+spk.average.dplyr =tmp %>%
+  group_by(area) %>%
+  summarize(mean= mean(spikes))
+
+# Wrapping up the function:
+average_spike_area<-function(i.t,this_session){
+  spk.trial = this_session$spks[[i.t]]
+  area= this_session$brain_area
+  spk.count=apply(spk.trial,1,sum)
+  spk.average.tapply=tapply(spk.count, area, mean)
+  return(spk.average.tapply)
+  }
+
+# print: test the function
+average_spike_area(1,this_session = session[[i.s]])
+
+```
+
+```{r, fig.align='center'}
+n.trial=length(session[[i.s]]$feedback_type)
+n.area=length(unique(session[[i.s]]$brain_area ))
+# Alternatively, you can extract these information in the meta that we created before.
+
+# We will create a data frame that contain the average spike counts for each area, feedback type,  the two contrasts, and the trial id
+
+trial.summary =matrix(nrow=n.trial,ncol= n.area+1+2+1)
+for(i.t in 1:n.trial){
+  trial.summary[i.t,]=c(average_spike_area(i.t,this_session = session[[i.s]]),
+                          session[[i.s]]$feedback_type[i.t],
+                        session[[i.s]]$contrast_left[i.t],
+                        session[[i.s]]$contrast_right[i.s],
+                        i.t)
+}
+
+colnames(trial.summary)=c(names(average_spike_area(i.t,this_session = session[[i.s]])), 'feedback', 'left contr.','right contr.','id' )
+
+# Turning it into a data frame
+trial.summary <- as_tibble(trial.summary)
+
+area.col=rainbow(n=n.area,alpha=0.7)
+# In base R, I usually initiate a blank plot before drawing anything on it
+plot(x=1,y=0, col='white',xlim=c(0,n.trial),ylim=c(0.5,2.2), xlab="Trials",ylab="Average spike counts", main=paste("Spikes per area in Session", i.s))
+
+
+for(i in 1:n.area){
+  lines(y=trial.summary[[i]],x=trial.summary$id,col=area.col[i],lty=2,lwd=1)
+  lines(smooth.spline(trial.summary$id, trial.summary[[i]]),col=area.col[i],lwd=3)
+  }
+legend("topright", 
+  legend = colnames(trial.summary)[1:n.area], 
+  col = area.col, 
+  lty = 1, 
+  cex = 0.8
+)
+```
+<center>
+**Figure 2.2.3**: Average spike counts per trial in Session 2 (Cori).
+</center>
+
+This graph illustrates the mean spike count observed across trials during Session 2. From the graphical representation alone, it is clear that `VISpm` exhibits the highest activity among brain regions, with an average spike count of around 1.5 across trials. The next closest region is `VISI` and `POST`, with average spike counts hovering around 1.2-1.3. In this session, the other brain regions have fewer spike counts. For now, `VISpm` appears to be the most active region within Session 6. To validate this observation, a more detailed examination will be conducted, focusing on trials 1 and 5 using a raster plot.
+
+```{r, fig.align='center'}
+plot.trial<-function(i.t,area, area.col,this_session){
+    
+    spks=this_session$spks[[i.t]];
+    n.neuron=dim(spks)[1]
+    time.points=this_session$time[[i.t]]
+    
+    plot(0,0,xlim=c(min(time.points),max(time.points)),ylim=c(0,n.neuron+1),col='white', xlab='Time (s)',yaxt='n', ylab='Neuron', main=paste('Trial ',i.t, 'feedback', this_session$feedback_type[i.t] ),cex.lab=1.5)
+    for(i in 1:n.neuron){
+        i.a=which(area== this_session$brain_area[i]);
+        col.this=area.col[i.a]
+        
+        ids.spike=which(spks[i,]>0) # find out when there are spikes 
+        if( length(ids.spike)>0 ){
+            points(x=time.points[ids.spike],y=rep(i, length(ids.spike) ),pch='.',cex=2, col=col.this)
+        }
+      
+            
+    }
+    
+legend("topright", 
+  legend = area, 
+  col = area.col, 
+  pch = 16, 
+  cex = 0.8
+  )
+  }
+    
+```
+
+```{r, fig.width=8, fig.height=8}
+varname=names(trial.summary);
+area=varname[1:(length(varname)-4)]
+plot.trial(1,area, area.col,session[[i.s]])
+```
+<center>
+**Figure 2.2.4**: Raster plot for Trial 1 Feedback -1.
+</center>
+
+```{r, fig.align='center', fig.width=8, fig.height=8}
+varname=names(trial.summary);
+area=varname[1:(length(varname)-4)]
+par(mfrow=c(1,2))
+plot.trial(1,area, area.col,session[[i.s]])
+plot.trial(5,area, area.col,session[[i.s]])
+
+par(mfrow=c(1,1))
+```
+<center>
+**Figure 2.2.5**: Raster plots for Trial 1 and 5, feedback -1.
+</center>
+
+In neuroscience, raster plots serve as a common tool for visualizing neural activity, aiding in the examination of temporal patterns among individual or groups of neurons in reaction to stimuli. Each row within the plot corresponds to the activity of a single neuron, while multiple rows stacked together portray the activity of various neurons. In relation to our analysis, the stacked rows in the raster plot signify significant activity within the root region. Contrasting the line graph with the raster plot, `CA1` exhibits higher average spike counts, whereas Root displays a denser cluster of activated neurons in close proximity.
+
+```{r, fig.align='center'}
+# func to get trail data
+get_trail_data <- function(session_id, trail_id){
+  spikes <- session[[session_id]]$spks[[trail_id]]
+  if (any(is.na(spikes))){
+    disp("value missing")
+  }
+
+  #trail_tibble <- as_tibble(spikes) %>% set_names(binename) %>%  add_column("brain_area" = session[[session_id]]$brain_area ) %>% group_by(brain_area) %>% summarize( "sum_spikes" =across(everything(),sum),.groups = "drop") 
+  trail_tibble <- tibble("neuron_spike" = rowSums(spikes))  %>%  add_column("brain_area" = session[[session_id]]$brain_area ) %>% group_by(brain_area) %>% summarize( region_sum_spike = sum(neuron_spike), region_count = n(),region_mean_spike = mean(neuron_spike)) 
+  trail_tibble  = trail_tibble%>% add_column("trail_id" = trail_id) %>% add_column("contrast_left"= session[[session_id]]$contrast_left[trail_id]) %>% add_column("contrast_right"= session[[session_id]]$contrast_right[trail_id]) %>% add_column("feedback_type"= session[[session_id]]$feedback_type[trail_id])
+  trail_tibble
+}
+# func to get session data
+get_session_data <- function(session_id){
+  n_trail <- length(session[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail){
+    trail_tibble <- get_trail_data(session_id,trail_id)
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- do.call(rbind, trail_list)
+  session_tibble <- session_tibble %>% add_column("mouse_name" = session[[session_id]]$mouse_name) %>% add_column("date_exp" = session[[session_id]]$date_exp) %>% add_column("session_id" = session_id) 
+  session_tibble
+}
+# all sessions
+session_list = list()
+for (session_id in 1: 18){
+  session_list[[session_id]] <- get_session_data(session_id)
+}
+full_tibble <- do.call(rbind, session_list)
+full_tibble$success <- full_tibble$feedback_type == 1
+full_tibble$success <- as.numeric(full_tibble$success)
+full_tibble$contrast_diff <- abs(full_tibble$contrast_left-full_tibble$contrast_right)
+```
+
+```{r}
+get_trail_functional_data <- function(session_id, trail_id){
+  spikes <- session[[session_id]]$spks[[trail_id]]
+  if (any(is.na(spikes))){
+    disp("value missing")
+  }
+
+  trail_bin_average <- matrix(colMeans(spikes), nrow = 1)
+  #colnames(trail_bin_average) <- binename
+  trail_tibble  = as_tibble(trail_bin_average)%>% add_column("trail_id" = trail_id) %>% add_column("contrast_left"= session[[session_id]]$contrast_left[trail_id]) %>% add_column("contrast_right"= session[[session_id]]$contrast_right[trail_id]) %>% add_column("feedback_type"= session[[session_id]]$feedback_type[trail_id])
+  
+  trail_tibble
+}
+get_session_functional_data <- function(session_id){
+  n_trail <- length(session[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail){
+    trail_tibble <- get_trail_functional_data(session_id,trail_id)
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- as_tibble(do.call(rbind, trail_list))
+  session_tibble <- session_tibble %>% add_column("mouse_name" = session[[session_id]]$mouse_name) %>% add_column("date_exp" = session[[session_id]]$date_exp) %>% add_column("session_id" = session_id) 
+  session_tibble
+}
+```
+
+```{r}
+session_list = list()
+for (session_id in 1: 18){
+  session_list[[session_id]] <- get_session_functional_data(session_id)
+}
+full_functional_tibble <- as_tibble(do.call(rbind, session_list))
+full_functional_tibble$session_id <- as.factor(full_functional_tibble$session_id )
+full_functional_tibble$contrast_diff <- abs(full_functional_tibble$contrast_left-full_functional_tibble$contrast_right)
+
+full_functional_tibble$success <- full_functional_tibble$feedback_type == 1
+full_functional_tibble$success <- as.numeric(full_functional_tibble$success)
+```
+
+
+```{r, fig.align='center'}
+options(warn=-1)
+
+full_functional_tibble$trail_group = cut(full_functional_tibble$trail_id, breaks = seq(0, max(full_functional_tibble$trail_id), by = 25),include.lowest = TRUE)
+levels(full_functional_tibble$trail_group) <- seq(0, max(full_functional_tibble$trail_id), by = 25)[2:18]
+
+success_rate <- aggregate(success ~ session_id + trail_group, data = full_functional_tibble, FUN = function(x) mean(x) )
+ggplot(success_rate, aes(x = trail_group, y = success)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "Trail group",
+       y = "Success rate") +
+  facet_wrap(~session_id, ncol=3)+
+  theme_bw() +
+  ggtitle("Success rate change over time for individual sessions")
+
+```
+<center>
+**Figure 2.2.6**: Change in success over time per session.
+</center>
+
+```{r}
+success_rate <- aggregate(success ~ mouse_name + trail_group, data = full_functional_tibble, FUN = function(x) mean(x) )
+ggplot(success_rate, aes(x = trail_group, y = success)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "Trail group",
+       y = "Success rate") +
+  ggtitle("Success rate changing over time, per mouse") +
+  facet_wrap(~mouse_name) +
+      theme_bw()
+```
+<center>
+**Figure 2.2.7**: Change in success over time per mouse.
+</center>
+
+From the two graphs above, we see that success rate decreases with time for each session. Moreover, success rate also follows a negative decline per mouse, with Forssmann demonstrating the steepest decline. Both Cori and Forssmann drop off early because their time bins are less compared to Hench and Lederberg. These findings indicate that time may have an effect on predicting the success of mice.
+
+```{r, fig.align='center'}
+session_data <- session[[3]]
+
+feedback_nums <- table(session_data$feedback_type)
+average_contrasts <- (session_data$contrast_left + session_data$contrast_right) / 2
+plot.data <- data.frame(trial = 1:length(session_data$feedback_type),
+                        avg_contrast = average_contrasts,
+                        feedback = as.factor(session_data$feedback_type)
+                        )
+
+
+ggplot(plot.data, aes(x = trial, y = avg_contrast, color = feedback)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Trials", y = "Average Contrast", color = "Feedback Type") +
+  ggtitle("Trials vs. Average Constrast by Feedback Type") +
+  theme_minimal()
+```
+<center>
+**Figure 2.2.8**: Average contrast as trials progress, by feedback type.
+</center>
+
+As the trials progress, noticeable differences emerge from the various feedback types. Specifically, in Session 3 with Cori the mouse, shifts occur between instances where the mouse fails to draw the correct feedback type and instances where it does. This offers valuable insights into the fluctuating average feedback success rate over the course of the trials. Furthermore, it shows the subtle variances in contrast levels across the entire session, hinting at patterns where the mouse correctly interprets the stimuli. From this, we can explore factors beyond visual stimuli leading to the success of the mouse.
+
+## **3. Data Integration**
+```{r}
+df.merged <- data.frame()
+
+# Iterate over each session in the session list
+for (i in 1:length(session)) {
+  current_session <- session[[i]]  # Access the current session
+  
+  
+  # Create a temporary data frame for the current session's variables
+  temp_df <- tibble(
+    session = rep(paste("Session", i), length(current_session$feedback_type)),
+    contrast_left = current_session$contrast_left,
+    contrast_right = current_session$contrast_right,
+    feedback_type = current_session$feedback_type,
+    mouse_name = current_session$mouse_name,
+    date_exp = current_session$date_exp)
+  
+  avg_spikes_per_trial <- c()
+
+
+  for (x in 1:length(session[[i]]$feedback_type)){
+    avg_spikes_per_trial = c(avg_spikes_per_trial, mean(apply(session[[i]]$spks[[x]], MARGIN = 1, FUN = sum)))
+  }
+  
+  temp_df <- cbind(temp_df, avg_spks_neuron = avg_spikes_per_trial)
+  
+  # Append the temporary data frame to the data.integration data frame
+  df.merged <- bind_rows(df.merged, temp_df)
+  
+}
+
+df.merged$contrast_left <- df.merged$contrast_left[, 1] 
+df.merged$contrast_right <- df.merged$contrast_right[, 1]
+df.merged$feedback_type <- df.merged$feedback_type[, 1]
+```
+
+In order to pick the best model for predicting mice, we must first define the data set that will be used. To make this dataset, I merged every trial from each session into a master dataframe. This dataframe includes 5081 observations (total trials) and seven columns. The seven columns are session, `contrast_left`, `contrast_right`, `feedback_type`, `mouse_name`, `date_exp`, and `avg_spks_neuron.` By creating this comprehensive dataset, we have laid the groundwork for predictive modeling.
+```{r}
+kable(head(df.merged), format = "html", table.attr = "class='table table-striped'",digits=2, caption = "Dataset for Predictive Modeling: First 6 Observations")
+```
+<center>
+**Figure 3.1**: First six observations of the final dataset for predictive modeling.
+</center>
+
+
+## **4. Predictive Modeling**
+My dataset contains categorical variables. I attempted two different models to predict `feedback_type`: logistic regression and decision trees. However, I did not use XGBoost. XGBoost is designed to work with numerical data efficiently. While it can handle categorical variables using techniques like one-hot encoding or ordinal encoding, these transformations  introduce additional complexity and potential pitfalls, such as the curse of dimensionality or loss of information. Additionally, my R session would run very slowly, and my computer would start to burn up when I ran XGBoost. For these reasons, I decided not to use XGBoost in predictive modeling.
+
+### 4.1 Logistic Regression (all variables)
+We use the merged dataset to create a Logistic Regression model to predict `feedback_type`.
+```{r}
+set.seed(8)
+# encode feedback_type as factor
+df.merged$feedback_type = factor(df.merged$feedback_type, levels = c(-1,1))
+
+# train test split
+set.seed(1)
+split = sample.split(df.merged$feedback_type, SplitRatio = 0.8)
+train_set = subset(df.merged, split == TRUE)
+test_set = subset(df.merged, split == FALSE)
+
+# fit to training set
+lg.model = glm(formula = feedback_type ~ .,
+                 family = binomial,
+                 data = train_set)
+
+# predicting test set
+prob_pred_lg = predict(lg.model, type = 'response', newdata = test_set[-4])
+y_pred_lg = ifelse(prob_pred_lg > 0.5, 1, -1)
+
+precision_lg <- sum(y_pred_lg == 1 & test_set[, 4] == 1) / sum(y_pred_lg == 1)
+recall_lg <- sum(y_pred_lg == 1 & test_set[, 4] == 1) / sum(test_set[, 4] == 1)
+f1_lg <- 2* precision_lg * recall_lg / (precision_lg + recall_lg)
+```
+
+```{r}
+misc_rate_lg <- sum(test_set[, 4] != y_pred_lg) / nrow(test_set)
+print(paste("Precision:",precision_lg))
+print(paste("Recall:",recall_lg))
+print(paste("F1 score:",f1_lg))
+print(paste("Misclassification Error Rate:",misc_rate_lg))
+
+cm_digits = table(test_set[, 4], y_pred_lg)
+accuracy = (sum(diag(cm_digits))/sum(cm_digits))
+print(paste("Accuracy",accuracy))
+```
+
+```{r, fig.align='center'}
+# confusion matrix
+cm_pred <- factor(prob_pred_lg > 0.5, labels = c('-1', '1'))
+cm <- confusionMatrix(cm_pred, test_set$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#2403fc") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1")) +
+  theme_minimal() +
+  ggtitle("Confusion Matrix: Logistic Regression")
+```
+<center>
+**Figure 4.1.1**: Confusion matrix for logistic regression.
+</center>
+
+Using Logistic Regression, we split the dataset into a training set and testing set, 0.8 and 0.2 of the original dataset respectively. The results are the following: precision is 72.51%, recall is 95.01%, and the F1 score is 0.8225 The misclassification error rate is approximately 29%. Precision is a measure of the accuracy of positive predictions made by a classifier. It is calculated as the ratio of true positive predictions to the sum of true positive and false positive predictions. Recall measures the ability of a classifier to find all the positive instances in the dataset. It is calculated as the ratio of true positive predictions to the sum of true positive and false negative predictions. The F1 score is the harmonic mean of precision and recall. It provides a single score that balances both precision and recall, making it a useful metric for evaluating classifiers, especially in situations where there is an imbalance between the classes. Lastly, the accuracy of this model hovers around 71%.
+
+### 4.2 Decision Tree
+```{r}
+set.seed(56)
+decision_tree <- rpart(formula = feedback_type ~ .,
+                    data = train_set)
+
+y_pred_dt <- predict(decision_tree, newdata = test_set[-4], type = 'class')
+
+# precision, recall, f1
+precision_dt <- sum(y_pred_dt == 1 & test_set[, 4] == 1) / sum(y_pred_dt == 1)
+recall_dt <- sum(y_pred_dt == 1 & test_set[, 4] == 1) / sum(test_set[, 4] == 1)
+f1_dt <- 2* precision_dt * recall_dt / (precision_dt + recall_dt)
+
+# confusion matrix
+cm.dt = table(test_set[, 4], y_pred_dt)
+
+# misclassification error rate
+misc_rate_dt <- (cm.dt[1, 2] + cm.dt[2, 1]) / sum(cm.dt)
+```
+
+```{r}
+print(paste("Precision:",precision_dt))
+print(paste("Recall:",recall_dt))
+print(paste("F1 score:",f1_dt))
+print(paste("Misclassification Error Rate:",misc_rate_dt))
+
+accuracy_dt = (sum(diag(cm.dt))/sum(cm.dt))
+print(paste("Accuracy",accuracy_dt))
+```
+Using a Decision Tree, we split the dataset into a training set and testing set, 0.8 and 0.2 of the original dataset respectively. A decision tree is a flowchart-like structure where an internal node represents a feature (or attribute), the branch represents a decision rule, and each leaf node represents an outcome or class label. The results are as follows: precision is 74.05%, recall is 94.87%, and the F1 score is 0.8318. The misclassification error rate is 27.24%, and the accuracy of the decision tree model is 72.76%. Although the difference is marginal, the decision tree performs slightly better compared to logistic regression, by about 1%.
+
+
+## **5. Prediction Performance**
+```{r}
+test.p5 = list()
+for(i in 1:2){
+  test.p5[[i]] <- readRDS(paste('/Users/AmandaLi/Desktop/Courses/STA141A/Final-Project/test/test',i,'.rds',sep=''))
+  #print(test[[i]]$mouse_name)
+  #print(test[[i]]$date_exp)
+}
+```
+
+```{r}
+# first test set
+test.df.1 <- data.frame(session = rep(paste("Session", 1), length(test.p5[[1]]$feedback_type)),
+                        contrast_left = test.p5[[1]]$contrast_left,
+                         contrast_right = test.p5[[1]]$contrast_right,
+                         feedback_type = test.p5[[1]]$feedback_type,
+                         mouse_name = rep(test.p5[[1]]$mouse_name, each = nrow(test.p5[[1]]) ),
+                         date_exp = rep(test.p5[[1]]$date_exp, each = nrow(test.p5[[1]]) )
+                         )
+avg_spikes_per_trial <- c()
+  for (b in 1:100){
+    avg_spikes_per_trial = c(avg_spikes_per_trial, mean(apply(test.p5[[1]]$spks[[b]], MARGIN = 1, FUN = sum)))
+  }
+test.df.1 <- cbind(test.df.1, avg_spks_neuron = avg_spikes_per_trial)
+test.df.1$feedback_type = factor(test.df.1$feedback_type, levels = c(-1,1))
+
+# second test set
+test.df.2 <- data.frame(session = rep(paste("Session", 2), length(test.p5[[2]]$feedback_type)),
+                        contrast_left = test.p5[[2]]$contrast_left,
+                         contrast_right = test.p5[[2]]$contrast_right,
+                         feedback_type = test.p5[[2]]$feedback_type,
+                         mouse_name = rep(test.p5[[2]]$mouse_name, each = nrow(test.p5[[2]]) ),
+                         date_exp = rep(test.p5[[2]]$date_exp, each = nrow(test.p5[[2]]) )
+                         )
+avg_spikes_per_trial <- c()
+  for (b in 1:100){
+    avg_spikes_per_trial = c(avg_spikes_per_trial, mean(apply(test.p5[[2]]$spks[[b]], MARGIN = 1, FUN = sum)))
+  }
+test.df.2 <- cbind(test.df.2, avg_spks_neuron = avg_spikes_per_trial)
+test.df.2$feedback_type = factor(test.df.2$feedback_type, levels = c(-1,1))
+
+
+test.merged <- rbind(test.df.1, test.df.2)
+test.merged <- na.omit(test.merged)
+```
+
+### 5.1 Logistic Regression Test
+```{r}
+# predicting new set with lg
+set.seed(49)
+# encode feedback_type as factor
+test.merged$feedback_type = factor(test.merged$feedback_type, levels = c(-1,1))
+prob_pred_lg_test = predict(lg.model, type = 'response', newdata = test.merged[-4])
+y_pred_lg_test = ifelse(prob_pred_lg_test > 0.5, 1, -1)
+
+precision_lg_test <- sum(y_pred_lg_test == 1 & test.merged[, 4] == 1) / sum(y_pred_lg_test == 1)
+recall_lg_test <- sum(y_pred_lg_test == 1 & test.merged[, 4] == 1) / sum(test.merged[, 4] == 1)
+f1_lg_test <- 2* precision_lg_test * recall_lg_test / (precision_lg_test + recall_lg_test)
+misc_rate_lg_test <- sum(test.merged[, 4] != y_pred_lg_test) / nrow(test.merged)
+
+
+print(paste("Precision:",precision_lg_test))
+print(paste("Recall:",recall_lg_test))
+print(paste("F1 score:",f1_lg_test))
+print(paste("Misclassification Error Rate:",misc_rate_lg_test))
+print(paste("Accuracy:",1 - misc_rate_lg_test))
+```
+Because my model was trained on a specific format of a dataset, I merged the test data sets together in a similar format. Predicting using the logistic regression model, the results are as follows: precision is 76.73%, recall is 84.14%, and the F1 score is 0.8026. The accuracy is exactly 70%, meaning that the misclassification error rate is 30%. Our test accuracy using this new dataset appears to follow similar trends as the original accuracy of the model using 0.2 test data. From this, I consider this logistic regression model to be a reasonable predictor for `feedback_type`.
+
+### 5.2 Decision Tree Test
+```{r}
+y_pred_dt_test <- predict(decision_tree, newdata = test.merged[-4], type = 'class')
+
+# precision, recall, f1
+precision_dt_test <- sum(y_pred_dt_test == 1 & test.merged[, 4] == 1) / sum(y_pred_dt_test == 1)
+recall_dt_test <- sum(y_pred_dt_test == 1 & test.merged[, 4] == 1) / sum(test.merged[, 4] == 1)
+f1_dt_test <- 2* precision_dt_test * recall_dt_test / (precision_dt_test + recall_dt_test)
+
+# confusion matrix
+cm.dt_test = table(test.merged[, 4], y_pred_dt_test)
+
+# misclassification error rate
+misc_rate_dt_test <- (cm.dt_test[1, 2] + cm.dt_test[2, 1]) / sum(cm.dt_test)
+
+print(paste("Precision:",precision_dt_test))
+print(paste("Recall:",recall_dt_test))
+print(paste("F1 score:",f1_dt_test))
+print(paste("Misclassification Error Rate:",misc_rate_dt_test))
+print(paste("Accuracy:",1 - misc_rate_dt_test))
+```
+Predicting using the decision tree model, the results are as follows: precision is 74.65%, recall is 68.97%, and F1 score is 0.7168. The accuracy is 0.605 and the misclassification error rate is 0.395. Interestingly, the decision tree was the best choice using the 0.8/0.2 split data, yet it performed 10% worse in accuracy when this new test data was introduced. On the other hand, the logistic regression model accuracy remained relatively the same despite the new data. 
+
+### 5.3 Final Model
+From my results using the test data, I have chosen logistic regression to be the most robust model in the scope of this project. The logistic regression model had an accuracy of 70%, while the decision tree model had an accuracy of 60.5% (decrease by 10%). There may be several reasons for the decrease in accuracy in my decision tree model. Logistic regression can be effective when dealing with datasets with a small number of features or when feature interactions are limited. Decision trees may struggle to generalize well in high-dimensional spaces or when there are many features, leading to overfitting or poor generalization. Additionally, logistic regression models are inherently more interpretable than decision trees. In some cases, the simplicity of logistic regression models may lead to better accuracy because it's easier to understand and identify the most relevant features for prediction.
+
+## **6. Discussion**
+During this project, I gained valuable insights into the neural pathways of mice. Initially, I conducted Exploratory Data Analysis (EDA) to organize and analyze data from 18 sessions. This structured approach facilitated a comprehensive understanding of the dataset throughout the project. To delve into neural activities during sessions and trials, I calculated the average number of spikes for each mouse, revealing intriguing differences. Notably, Forssmann exhibited the highest spike count, while Lederberg displayed the lowest. To track changes across trials, spikes per area throughout Session 2. This visual representation highlighted variations in contrast levels and mice responses to visual stimuli, specifically in the brain areas. Concluding the EDA, I plotted feedback success rates against contrasts, which showed patterns where the mouse correctly interpreted the stimuli.
+
+In my predictive models, I used logistic regression as well as a decision tree. Both utilized the dataset I had created during data integration, which only represented seven variables. In the future, I would like to utilize the brain area data as well. This was not included in my data integration, due to its complexity. Additionally, I would like to try using XGBoost to predict feedback type. I decided not to use XGBoost because it performs better on numeric data. My dataset contains categorical variables. Overall, this project was very comprehensive and I had the opportunity to learn more about statistical data science by working with this unique dataset.
+
+## **Appendix**
+I used the boilerplate code provided by the consulting sessions and the TA discussions. I used ChatGPT to brainstorm predictive modeling methods, alter the boilerplate code provided by the course, and edit my research report.
+
+Findling, C., Hubert, F., Acerbi, L., Benson, B., Benson, J., Birman, D., Bonacchi, N., Carandini, M., Catarino, J. A., Chapuis, G. A., Churchland, A. K., Dan, Y., DeWitt, E. E., Engel, T. A., Fabbri, M., Faulkner, M., Fiete, I. R., Freitas-Silva, L., Gerçek, B., … Pouget, A. (2023). Brain-wide representations of prior information in mouse decision-making. Cold Spring Harbor Laboratory. http://dx.doi.org/10.1101/2023.07.04.547684
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+```{r}
+sessionInfo()
+```
+
+
+
